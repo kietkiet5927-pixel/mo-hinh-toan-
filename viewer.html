@@ -705,20 +705,45 @@ async function decodeViewerPayload(encoded) {
     }
 
     async function loadViewerFromUrl() {
-      const urlView = new URLSearchParams(window.location.search).get("view");
+      const qs = new URLSearchParams(window.location.search);
+      const urlView = qs.get("view");
       const hashView = window.location.hash.match(/^#view=([^&]+)/)?.[1];
       const raw = urlView || hashView;
-      if (!raw) {
-        setViewerBanner("Chưa có dữ liệu hình — Hãy mở link #view=... từ PDF hoặc app tạo hình");
+      const shapeId = qs.get("id") || window.location.hash.match(/^#id=([^&]+)/)?.[1];
+
+      if (raw) {
+        try {
+          const snap = await decodeViewerPayload(raw);
+          if (snap?.spec) applyFrozenViewerState(snap);
+          else setViewerBanner("Dữ liệu #view=... không hợp lệ");
+        } catch (err) {
+          setViewerBanner("Không thể giải mã link #view=...: " + err.message);
+        }
         return;
       }
-      try {
-        const snap = await decodeViewerPayload(raw);
-        if (snap?.spec) applyFrozenViewerState(snap);
-        else setViewerBanner("Dữ liệu #view=... không hợp lệ");
-      } catch (err) {
-        setViewerBanner("Không thể giải mã link #view=...: " + err.message);
+
+      if (shapeId) {
+        const cleanId = decodeURIComponent(shapeId);
+        try {
+          setViewerBanner("Đang tải hình '" + cleanId + "'...");
+          const res = await fetch("shapes.json?t=" + Date.now());
+          if (!res.ok) throw new Error("HTTP " + res.status + " (Chưa thấy file shapes.json cùng thư mục)");
+          const db = await res.json();
+          const entry = db && db[cleanId];
+          if (!entry) {
+            setViewerBanner("Không tìm thấy mã hình '" + cleanId + "' trong shapes.json");
+            return;
+          }
+          const snap = typeof entry === "string" ? await decodeViewerPayload(entry) : entry;
+          if (snap?.spec) applyFrozenViewerState(snap);
+          else setViewerBanner("Dữ liệu của mã '" + cleanId + "' bị lỗi");
+        } catch (err) {
+          setViewerBanner("Không tải được shapes.json: " + err.message);
+        }
+        return;
       }
+
+      setViewerBanner("Chưa có dữ liệu hình — Hãy mở link #view=... hoặc #id=... từ PDF/app tạo hình");
     }
 
     if (FROZEN) {
