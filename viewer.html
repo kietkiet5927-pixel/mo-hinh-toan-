@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Trình xem Hình Học Không Gian 3D — Chỉ Xem 3D</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; overflow: hidden; font-family: "Segoe UI", system-ui, sans-serif; }
+    #viewport { position: fixed; inset: 0; }
+    .math-label {
+      color: #000000; background: transparent; padding: 0; border: none;
+      font-family: "Times New Roman", Cambria, Georgia, serif; font-style: italic;
+      font-weight: 500; font-size: 19px; line-height: 1; white-space: nowrap;
+      pointer-events: none; user-select: none;
+      text-shadow: 0 0 4px #ffffff, 0 0 6px #ffffff;
+    }
+    body:not(.light) .math-label { color: #f8fafc; text-shadow: 0 0 4px #0b1120, 0 0 6px #0b1120; }
+    .math-label.aux { color: #0f172a; font-size: 17px; }
+    body:not(.light) .math-label.aux { color: #6ee7b7; }
+    .math-label.dist, .math-label.angle { font-style: normal; font-size: 14px; font-weight: 600; color: #b45309; }
+    .math-label.line-red { color: #dc2626; font-size: 19px; }
+    .math-label.line-blue { color: #1d4ed8; font-size: 19px; }
+    .bar {
+      position: fixed; top: 12px; left: 12px; z-index: 20; display: flex; align-items: center; gap: 8px;
+      padding: 6px 12px; border-radius: 999px; font-size: 12.5px;
+      background: rgba(255,255,255,0.88); border: 1px solid #cbd5e1; color: #0f172a;
+      box-shadow: 0 6px 20px rgba(15,23,42,0.12); backdrop-filter: blur(8px);
+    }
+    body:not(.light) .bar { background: rgba(15,23,42,0.86); border-color: #334155; color: #f1f5f9; }
+    .bar button {
+      padding: 3px 9px; border-radius: 999px; border: 1px solid #94a3b8;
+      background: transparent; color: inherit; cursor: pointer; font-size: 11.5px; font-weight: 600;
+    }
+    .hint {
+      position: fixed; left: 50%; transform: translateX(-50%); bottom: 12px; z-index: 20;
+      padding: 5px 12px; border-radius: 999px; font-size: 11.5px; pointer-events: none;
+      background: rgba(255,255,255,0.88); border: 1px solid #cbd5e1; color: #475569; white-space: nowrap;
+    }
+    body:not(.light) .hint { background: rgba(15,23,42,0.86); border-color: #334155; color: #cbd5e1; }
+  </style>
+  <script type="importmap">
+    { "imports": { "three": "https://unpkg.com/three@0.186.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.186.0/examples/jsm/" } }
+  </script>
+</head>
+<body class="light">
+  <div id="viewport"></div>
+  <div class="bar">
+    <span id="viewerTitleEl">👁 <b>Trình xem Hình Học Không Gian 3D</b></span>
+    <button id="resetCam">↺ Góc ban đầu</button>
+  </div>
+  <div class="hint">Chế độ Chỉ Xem • Chuột trái: Xoay 3D • Chuột phải: Dịch • Con lăn: Thu phóng</div>
+  <script type="module">
+    import * as THREE from "three";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+    import { CSS2DRenderer, CSS2DObject } from "three/addons/renderers/CSS2DRenderer.js";
+    import { LineSegments2 } from "three/addons/lines/LineSegments2.js";
+    import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js";
+    import { LineMaterial } from "three/addons/lines/LineMaterial.js";
+
+    let FROZEN = null;
+    const toThree = (x, y, z) => new THREE.Vector3(y, z, x);
+    const ptToThree = (p) => new THREE.Vector3(p.y, p.z, p.x);
+
+    const container = document.getElementById("viewport");
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    container.appendChild(renderer.domElement);
+
+    const labelRenderer = new CSS2DRenderer();
+    labelRenderer.setSize(window.innerWidth, window.innerHeight);
+    labelRenderer.domElement.style.cssText = "position:absolute;top:0;left:0;pointer-events:none;";
+    container.appendChild(labelRenderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0xffffff);
+    const camera = new THREE.PerspectiveCamera(42, window.innerWidth / window.innerHeight, 0.1, 300);
+    camera.position.set(10, 8, 12);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.06;
+
+    scene.add(new THREE.AmbientLight(0xffffff, 0.85));
+    const dirLight = new THREE.DirectionalLight(0xffffff, 1.25);
+    dirLight.position.set(8, 15, 10);
+    scene.add(dirLight);
+
+    const rootGroup = new THREE.Group();
+    scene.add(rootGroup);
+    const uiState = { mode: "sgk", light: true, showAxes: false, showEdgeLabels: false, showVertexLabels: true };
+    let polyTopology = null, solidEdgeLine = null, hiddenEdgeLine = null;
+    let dynamicSegmentGroups = [], draggableMeshes = [];
+
+    function disposeObjectTree(root) {
+      root.traverse((obj) => {
+        if (obj.isCSS2DObject && obj.element?.parentNode) obj.element.remove();
+        if (obj.geometry) obj.geometry.dispose();
+        if (obj.material) {
+          const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+          mats.forEach((m) => m.dispose());
+        }
+      });
+      root.clear();
+    }
+
+function makeLabel(html, pos, cls = "math-label", offset = new THREE.Vector3(0, 0.22, 0)) {
+      const div = document.createElement("div");
+      div.className = cls;
+      div.innerHTML = html;
+      const obj = new CSS2DObject(div);
+      obj.position.copy(pos).add(offset);
+      return obj;
+    }
+
+function makePoint(html, pos, color = 0x000000, cls = "math-label", offset = new THREE.Vector3(0, 0.18, 0), vertexId = null) {
+      const g = new THREE.Group();
+      const sphere = new THREE.Mesh(
+        new THREE.SphereGeometry(0.048, 16, 12),
+        new THREE.MeshBasicMaterial({ color })
+      );
+      sphere.position.copy(pos);
+      g.add(sphere);
+      if (vertexId) {
+        // Vùng chạm vô hình rộng hơn để dễ bắt trúng và kéo điểm bằng chuột
+        const hitMesh = new THREE.Mesh(
+          new THREE.SphereGeometry(0.24, 12, 10),
+          new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false })
+        );
+        hitMesh.position.copy(pos);
+        hitMesh.userData = { vertexId, dotMesh: sphere };
+        g.add(hitMesh);
+        draggableMeshes.push(hitMesh);
+      }
+      if (html) g.add(makeLabel(html, pos, cls, offset));
+      return g;
+    }
+
+function makeLineSegments2(pairs, { color = 0x000000, linewidth = 2.0, dashed = false } = {}) {
+      const mat = new LineMaterial({
+        color, linewidth, dashed, dashScale: 1, dashSize: 0.16, gapSize: 0.11,
+        resolution: new THREE.Vector2(window.innerWidth, window.innerHeight)
+      });
+      const geom = new LineSegmentsGeometry();
+      const flat = pairs.flatMap(([p, q]) => [p.x, p.y, p.z, q.x, q.y, q.z]);
+      const line = new LineSegments2(geom, mat);
+      if (flat.length === 0) line.visible = false;
+      else {
+        geom.setPositions(flat);
+        line.computeLineDistances();
+      }
+      return line;
+    }
+
+function updateLineSegments2(line, pairs) {
+      const flat = pairs.flatMap(([p, q]) => [p.x, p.y, p.z, q.x, q.y, q.z]);
+      if (flat.length === 0) {
+        line.visible = false;
+        return;
+      }
+      line.visible = true;
+      line.geometry.dispose();
+      line.geometry = new LineSegmentsGeometry().setPositions(flat);
+      line.computeLineDistances();
+    }
+
+function makeRightAngleMark(vertex, p1, p2, size = 0.24, color = 0xfbbf24) {
+      const d1 = p1.clone().sub(vertex);
+      const d2 = p2.clone().sub(vertex);
+      if (d1.lengthSq() < 1e-6 || d2.lengthSq() < 1e-6) return new THREE.Group();
+      const u = d1.normalize().multiplyScalar(size);
+      const v = d2.normalize().multiplyScalar(size);
+      const a = vertex.clone().add(u);
+      const b = a.clone().add(v);
+      const c = vertex.clone().add(v);
+      return makeLineSegments2([[a, b], [b, c]], { color, linewidth: 2.0 });
+    }
+
+function makeAngleArc(vertex, p1, p2, radius = 0.65, color = 0xf59e0b, prefix = "φ = ") {
+      const g = new THREE.Group();
+      const u = p1.clone().sub(vertex).normalize();
+      const v = p2.clone().sub(vertex).normalize();
+      const ang = Math.acos(THREE.MathUtils.clamp(u.dot(v), -1, 1));
+      if (ang < 1e-4) return g;
+      const axis = new THREE.Vector3().crossVectors(u, v);
+      if (axis.lengthSq() < 1e-8) axis.set(0, 1, 0);
+      else axis.normalize();
+
+      const segs = 26;
+      const pts = [];
+      const pos = [vertex.x, vertex.y, vertex.z];
+      for (let i = 0; i <= segs; i++) {
+        const p = u.clone().applyAxisAngle(axis, (i / segs) * ang).multiplyScalar(radius).add(vertex);
+        pts.push(p);
+        pos.push(p.x, p.y, p.z);
+      }
+      const idx = [];
+      for (let i = 1; i <= segs; i++) idx.push(0, i, i + 1);
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+      geom.setIndex(idx);
+      g.add(new THREE.Mesh(geom, new THREE.MeshBasicMaterial({
+        color, transparent: true, opacity: 0.28, side: THREE.DoubleSide, depthWrite: false
+      })));
+      const pairs = [];
+      for (let i = 0; i < pts.length - 1; i++) pairs.push([pts[i], pts[i + 1]]);
+      g.add(makeLineSegments2(pairs, { color, linewidth: 2.2 }));
+
+      const deg = THREE.MathUtils.radToDeg(ang).toFixed(1);
+      if (uiState.showEdgeLabels) {
+        const mid = u.clone().applyAxisAngle(axis, ang * 0.5).multiplyScalar(radius * 1.36).add(vertex);
+        g.add(makeLabel(`${prefix}${deg}°`, mid, "math-label angle", new THREE.Vector3()));
+      }
+      return g;
+    }
+
+function createOxyzAxes(len = 6.2) {
+      const g = new THREE.Group();
+      const O = new THREE.Vector3(0, 0, 0);
+      const makeAxis = (dir, col, name) => {
+        const end = dir.clone().multiplyScalar(len);
+        g.add(makeLineSegments2([[O, end]], { color: col, linewidth: 2.2 }));
+        const cone = new THREE.Mesh(
+          new THREE.ConeGeometry(0.08, 0.24, 14),
+          new THREE.MeshStandardMaterial({ color: col })
+        );
+        cone.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().normalize());
+        cone.position.copy(end);
+        g.add(cone);
+        g.add(makeLabel(`<i>${name}</i>`, end.clone().addScaledVector(dir, 0.28), "math-label", new THREE.Vector3()));
+      };
+      makeAxis(toThree(1, 0, 0), 0xef4444, "x");
+      makeAxis(toThree(0, 1, 0), 0x22c55e, "y");
+      makeAxis(toThree(0, 0, 1), 0x3b82f6, "z");
+      return g;
+    }
+
+function clipConvexPolyhedron(vertsMap, facesList, n, p0) {
+      const polyIds = [...new Set(facesList.flatMap((f) => f.vertices))];
+      const verts = polyIds.map((id) => ({ id, pos: ptToThree(vertsMap.get(id)) }));
+      const idxMap = new Map(verts.map((v, i) => [v.id, i]));
+
+      const edgeSet = new Map();
+      for (const f of facesList) {
+        const arr = f.vertices;
+        for (let i = 0; i < arr.length; i++) {
+          const u = idxMap.get(arr[i]), v = idxMap.get(arr[(i + 1) % arr.length]);
+          if (u === undefined || v === undefined) continue;
+          const k = u < v ? `${u}_${v}` : `${v}_${u}`;
+          edgeSet.set(k, [u, v, arr[i], arr[(i + 1) % arr.length]]);
+        }
+      }
+
+      const unitN = n.clone().normalize();
+      const dists = verts.map((v) => v.pos.clone().sub(p0).dot(unitN));
+      const raw = [];
+
+      for (const [i, j] of edgeSet.values()) {
+        const d1 = dists[i], d2 = dists[j];
+        if (Math.abs(d1) < 1e-5) raw.push({ pos: verts[i].pos.clone() });
+        if (Math.abs(d2) < 1e-5) raw.push({ pos: verts[j].pos.clone() });
+        if (d1 * d2 < -1e-8) {
+          const t = d1 / (d1 - d2);
+          raw.push({ pos: new THREE.Vector3().lerpVectors(verts[i].pos, verts[j].pos, t) });
+        }
+      }
+
+      const unique = [];
+      for (const item of raw) {
+        if (!unique.some((u) => u.pos.distanceToSquared(item.pos) < 1e-6)) unique.push(item);
+      }
+      if (unique.length < 3) return { points: [], area: 0, perimeter: 0 };
+
+      const c = unique.reduce((acc, u) => acc.add(u.pos), new THREE.Vector3()).divideScalar(unique.length);
+      const ref = Math.abs(unitN.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+      const e1 = new THREE.Vector3().crossVectors(unitN, ref).normalize();
+      const e2 = new THREE.Vector3().crossVectors(unitN, e1).normalize();
+
+      unique.sort((a, b) => {
+        const va = a.pos.clone().sub(c), vb = b.pos.clone().sub(c);
+        return Math.atan2(va.dot(e2), va.dot(e1)) - Math.atan2(vb.dot(e2), vb.dot(e1));
+      });
+
+      let perimeter = 0;
+      const crossSum = new THREE.Vector3();
+      for (let i = 0; i < unique.length; i++) {
+        perimeter += unique[i].pos.distanceTo(unique[(i + 1) % unique.length].pos);
+        if (i >= 1 && i < unique.length - 1) {
+          crossSum.add(new THREE.Vector3().crossVectors(
+            unique[i].pos.clone().sub(unique[0].pos),
+            unique[i + 1].pos.clone().sub(unique[0].pos)
+          ));
+        }
+      }
+      return { points: unique.map((u) => u.pos), area: 0.5 * crossSum.length(), perimeter };
+    }
+
+function extractOuterHullFaces(threeVerts) {
+      const nPts = threeVerts.length;
+      if (nPts < 4) return null;
+      const center = threeVerts.reduce((acc, p) => acc.clone().add(p), new THREE.Vector3()).divideScalar(nPts);
+      const planes = [];
+      const EPS = 0.03;
+
+      for (let i = 0; i < nPts; i++) {
+        for (let j = i + 1; j < nPts; j++) {
+          for (let k = j + 1; k < nPts; k++) {
+            const cr = new THREE.Vector3().subVectors(threeVerts[j], threeVerts[i])
+              .cross(new THREE.Vector3().subVectors(threeVerts[k], threeVerts[i]));
+            if (cr.length() < 1e-3) continue;
+            const n = cr.normalize();
+            if (n.dot(new THREE.Vector3().subVectors(threeVerts[i], center)) < 0) n.negate();
+
+            let isOuter = true;
+            for (let m = 0; m < nPts; m++) {
+              if (n.dot(new THREE.Vector3().subVectors(threeVerts[m], threeVerts[i])) > EPS) {
+                isOuter = false;
+                break;
+              }
+            }
+            if (!isOuter) continue;
+
+            const d = n.dot(threeVerts[i]);
+            if (!planes.some((pl) => pl.n.dot(n) > 0.995 && Math.abs(pl.d - d) < EPS * 1.5)) {
+              planes.push({ n, d, refPt: threeVerts[i] });
+            }
+          }
+        }
+      }
+
+      if (planes.length < 4) return null;
+      const hullFaces = [];
+
+      for (const pl of planes) {
+        const coplanar = [];
+        for (let m = 0; m < nPts; m++) {
+          if (Math.abs(pl.n.dot(threeVerts[m]) - pl.d) <= EPS * 1.5) coplanar.push(m);
+        }
+        if (coplanar.length < 3) continue;
+
+        const ref = Math.abs(pl.n.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+        const e1 = new THREE.Vector3().crossVectors(pl.n, ref).normalize();
+        const e2 = new THREE.Vector3().crossVectors(pl.n, e1).normalize();
+
+        const pts2d = coplanar.map((idx) => {
+          const rel = new THREE.Vector3().subVectors(threeVerts[idx], pl.refPt);
+          return { idx, u: rel.dot(e1), v: rel.dot(e2) };
+        }).sort((a, b) => (Math.abs(a.u - b.u) > 1e-4 ? a.u - b.u : a.v - b.v));
+
+        const cross2 = (o, a, b) => (a.u - o.u) * (b.v - o.v) - (a.v - o.v) * (b.u - o.u);
+        const lower = [];
+        for (const p of pts2d) {
+          while (lower.length >= 2 && cross2(lower[lower.length - 2], lower[lower.length - 1], p) <= 1e-3) lower.pop();
+          lower.push(p);
+        }
+        const upper = [];
+        for (let i = pts2d.length - 1; i >= 0; i--) {
+          const p = pts2d[i];
+          while (upper.length >= 2 && cross2(upper[upper.length - 2], upper[upper.length - 1], p) <= 1e-3) upper.pop();
+          upper.push(p);
+        }
+        upper.pop();
+        lower.pop();
+        const hull = lower.concat(upper).map((p) => p.idx);
+        if (hull.length >= 3) hullFaces.push(hull);
+      }
+
+      return hullFaces.length >= 4 ? hullFaces : null;
+    }
+
+function addDynamicClassifiedSegments(pairs, { color = 0xfbbf24, linewidth = 2.4 } = {}) {
+      const solidLine = makeLineSegments2([], { color, linewidth, dashed: false });
+      const dashedLine = makeLineSegments2([], { color, linewidth: Math.max(1.65, linewidth * 0.82), dashed: true });
+      rootGroup.add(solidLine, dashedLine);
+      dynamicSegmentGroups.push({ pairs, solidLine, dashedLine });
+    }
+
+function drawSectionPolygon(points, color = 0xf43f5e, opacity = 0.36, showOutline = true) {
+      const pos = points.flatMap((p) => [p.x, p.y, p.z]);
+      const idx = [];
+      for (let i = 1; i < points.length - 1; i++) idx.push(0, i, i + 1);
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+      geom.setIndex(idx);
+      rootGroup.add(new THREE.Mesh(geom, new THREE.MeshBasicMaterial({
+        color, transparent: true, opacity, side: THREE.DoubleSide,
+        depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1
+      })));
+      if (showOutline) {
+        const pairs = points.map((p, i) => [p, points[(i + 1) % points.length]]);
+        // Các cạnh của thiết diện cũng tự động phân loại Nét liền (trên mặt thấy) / Nét đứt (trên mặt khuất hoặc trong lòng khối)!
+        addDynamicClassifiedSegments(pairs, { color, linewidth: 3.0 });
+      }
+    }
+
+function isPointOccludedByConvexPolyhedron(pt, camPos, faceNormals, faceCenters) {
+      let tMin = 0.001;
+      let tMax = 0.999;
+      const dir = camPos.clone().sub(pt);
+      for (let i = 0; i < faceNormals.length; i++) {
+        const n = faceNormals[i];
+        const num = -n.dot(pt.clone().sub(faceCenters[i]));
+        const den = n.dot(dir);
+        if (Math.abs(den) < 1e-8) {
+          if (num < -1e-4) return false;
+        } else if (den > 0) {
+          tMax = Math.min(tMax, num / den);
+        } else {
+          tMin = Math.max(tMin, num / den);
+        }
+        if (tMin > tMax) return false;
+      }
+      return tMin <= tMax;
+    }
+
+function isPointVisibleFromCamera(pt, front) {
+      if (uiState.mode !== "sgk" || !polyTopology) return true;
+      const { faceNormals, faceCenters } = polyTopology;
+      const EPS = 0.022;
+
+      const insideOrOnPoly = faceNormals.every((n, fi) => n.dot(pt.clone().sub(faceCenters[fi])) <= EPS);
+      if (insideOrOnPoly) {
+        const containingFaces = [];
+        for (let fi = 0; fi < faceNormals.length; fi++) {
+          const n = faceNormals[fi], fc = faceCenters[fi];
+          if (Math.abs(n.dot(pt.clone().sub(fc))) <= EPS) containingFaces.push(fi);
+        }
+        if (containingFaces.length > 0) {
+          return containingFaces.some((fi) => front[fi]);
+        }
+        // Nằm hẳn trong lòng khối đặc -> luôn bị che khuất (Nét đứt)
+        return false;
+      }
+
+      // Nằm ngoài khối đa diện -> kiểm tra tia nhìn về camera có bị khối che khuất không
+      return !isPointOccludedByConvexPolyhedron(pt, camera.position, faceNormals, faceCenters);
+    }
+
+function splitAndClassifySegment(p1, p2, front, visOut, hidOut) {
+      if (uiState.mode !== "sgk" || !polyTopology) {
+        visOut.push([p1, p2]);
+        return;
+      }
+      const len = p1.distanceTo(p2);
+      if (len < 1e-5) return;
+
+      const steps = Math.max(16, Math.min(72, Math.ceil(len / 0.14)));
+      const visArr = new Array(steps);
+      const tmp = new THREE.Vector3();
+      for (let k = 0; k < steps; k++) {
+        tmp.lerpVectors(p1, p2, (k + 0.5) / steps);
+        visArr[k] = isPointVisibleFromCamera(tmp, front);
+      }
+
+      let segStartT = 0;
+      let curState = visArr[0];
+
+      for (let k = 1; k < steps; k++) {
+        if (visArr[k] === curState) continue;
+        // Tìm chính xác ranh giới chuyển từ nét liền <-> nét đứt bằng tìm kiếm nhị phân (6 vòng)
+        let lo = (k - 0.5) / steps;
+        let hi = (k + 0.5) / steps;
+        for (let b = 0; b < 6; b++) {
+          const midT = 0.5 * (lo + hi);
+          tmp.lerpVectors(p1, p2, midT);
+          if (isPointVisibleFromCamera(tmp, front) === curState) lo = midT;
+          else hi = midT;
+        }
+        const tCut = 0.5 * (lo + hi);
+        const segA = p1.clone().lerp(p2, segStartT);
+        const segB = p1.clone().lerp(p2, tCut);
+        if (segA.distanceTo(segB) > 1e-4) {
+          (curState ? visOut : hidOut).push([segA, segB]);
+        }
+        segStartT = tCut;
+        curState = visArr[k];
+      }
+
+      const tailA = p1.clone().lerp(p2, segStartT);
+      if (tailA.distanceTo(p2) > 1e-4) {
+        (curState ? visOut : hidOut).push([tailA, p2]);
+      }
+    }
+
+function refreshDynamicEdges() {
+      const view = new THREE.Vector3();
+      let front = [];
+
+      if (polyTopology && solidEdgeLine && hiddenEdgeLine) {
+        const { verts, edges, faceNormals, faceCenters } = polyTopology;
+        front = faceNormals.map((n, i) => n.dot(view.subVectors(camera.position, faceCenters[i])) > 0);
+
+        if (uiState.mode !== "sgk") {
+          const all = edges.map((e) => [verts[e.u], verts[e.v]]);
+          updateLineSegments2(solidEdgeLine, all);
+          updateLineSegments2(hiddenEdgeLine, []);
+        } else {
+          const vis = [], hid = [];
+          for (const e of edges) {
+            const pair = [verts[e.u], verts[e.v]];
+            if (e.faces.some((fi) => front[fi])) vis.push(pair);
+            else hid.push(pair);
+          }
+          updateLineSegments2(solidEdgeLine, vis);
+          updateLineSegments2(hiddenEdgeLine, hid);
+        }
+      }
+
+      // Cập nhật động & tách từng đoạn Nét liền / Nét đứt chính xác theo phần thấy / khuất
+      for (const grp of dynamicSegmentGroups) {
+        const vis = [], hid = [];
+        for (const [p1, p2] of grp.pairs) {
+          splitAndClassifySegment(p1, p2, front, vis, hid);
+        }
+        updateLineSegments2(grp.solidLine, vis);
+        updateLineSegments2(grp.dashedLine, hid);
+      }
+    }
+
+function b64UrlToUint8(b64) {
+      const std = String(b64 || "").replace(/-/g, "+").replace(/_/g, "/");
+      const pad = std + "=".repeat((4 - (std.length % 4)) % 4);
+      const bin = atob(pad);
+      const out = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return out;
+    }
+
+async function decodeViewerPayload(encoded) {
+      if (!encoded || encoded.length < 2) return null;
+      const prefix = encoded[0];
+      const bytes = b64UrlToUint8(encoded.slice(1));
+      if (prefix === "z" && typeof DecompressionStream !== "undefined") {
+        const ds = new DecompressionStream("deflate-raw");
+        const writer = ds.writable.getWriter();
+        writer.write(bytes);
+        writer.close();
+        const rawBuf = await new Response(ds.readable).arrayBuffer();
+        return JSON.parse(new TextDecoder().decode(rawBuf));
+      }
+      return JSON.parse(new TextDecoder().decode(bytes));
+    }
+
+    function renderFrozenScene(spec) {
+      disposeObjectTree(rootGroup);
+      polyTopology = null; solidEdgeLine = null; hiddenEdgeLine = null; dynamicSegmentGroups = [];
+      const isLight = uiState.light;
+      const vMap = new Map(spec.vertices.map((v) => [v.id, v]));
+      if (uiState.showAxes || spec.showAxes) rootGroup.add(createOxyzAxes(6.2));
+
+      if (spec.faces && spec.faces.length > 0) {
+        const polyVertIds = [...new Set(spec.faces.flatMap((f) => f.vertices))].filter((id) => vMap.has(id) && id !== "I");
+        const idToIdx = new Map(polyVertIds.map((id, i) => [id, i]));
+        const threeVerts = polyVertIds.map((id) => ptToThree(vMap.get(id)));
+        const facePos = [], faceIdx = [];
+        threeVerts.forEach((v) => facePos.push(v.x, v.y, v.z));
+        let indexedFaces = extractOuterHullFaces(threeVerts) || [];
+        if (indexedFaces.length) {
+          for (const f of indexedFaces) for (let i = 1; i < f.length - 1; i++) faceIdx.push(f[0], f[i], f[i + 1]);
+        } else {
+          for (const f of spec.faces) {
+            const idxs = f.vertices.map((id) => idToIdx.get(id)).filter((x) => x !== undefined);
+            if (idxs.length >= 3) { indexedFaces.push(idxs); for (let i = 1; i < idxs.length - 1; i++) faceIdx.push(idxs[0], idxs[i], idxs[i + 1]); }
+          }
+        }
+        if (faceIdx.length) {
+          const geom = new THREE.BufferGeometry();
+          geom.setAttribute("position", new THREE.Float32BufferAttribute(facePos, 3));
+          geom.setIndex(faceIdx);
+          geom.computeVertexNormals();
+          rootGroup.add(new THREE.Mesh(geom, new THREE.MeshStandardMaterial({
+            color: isLight ? 0x0284c7 : 0x38bdf8, transparent: uiState.mode !== "solid",
+            opacity: uiState.mode === "solid" ? 0.9 : (uiState.mode === "xray" ? 0.14 : (isLight ? 0.025 : 0.05)),
+            depthWrite: uiState.mode === "solid", side: THREE.DoubleSide, roughness: 0.45, flatShading: true
+          })));
+          const bodyCenter = threeVerts.reduce((a, v) => a.add(v), new THREE.Vector3()).divideScalar(threeVerts.length);
+          const faceNormals = [], faceCenters = [], edgeMap = new Map();
+          indexedFaces.forEach((f, fi) => {
+            const n = new THREE.Vector3().subVectors(threeVerts[f[1]], threeVerts[f[0]]).cross(new THREE.Vector3().subVectors(threeVerts[f[2]], threeVerts[f[0]])).normalize();
+            const fc = f.reduce((a, idx) => a.add(threeVerts[idx]), new THREE.Vector3()).divideScalar(f.length);
+            if (n.dot(fc.clone().sub(bodyCenter)) < 0) n.negate();
+            faceNormals.push(n); faceCenters.push(fc);
+            for (let i = 0; i < f.length; i++) {
+              const u = f[i], v = f[(i + 1) % f.length], k = u < v ? u + "_" + v : v + "_" + u;
+              if (!edgeMap.has(k)) edgeMap.set(k, { u, v, faces: [] });
+              edgeMap.get(k).faces.push(fi);
+            }
+          });
+          polyTopology = { verts: threeVerts, edges: [...edgeMap.values()], faceNormals, faceCenters };
+          solidEdgeLine = makeLineSegments2([], { color: isLight ? 0x000000 : 0xf1f5f9, linewidth: 2.0 });
+          hiddenEdgeLine = makeLineSegments2([], { color: isLight ? 0x1e293b : 0x94a3b8, linewidth: 1.65, dashed: true });
+          rootGroup.add(solidEdgeLine, hiddenEdgeLine);
+        }
+      }
+
+      for (const seg of (spec.auxSegments || [])) {
+        const p1 = vMap.get(seg.from), p2 = vMap.get(seg.to);
+        if (!p1 || !p2) continue;
+        const v1 = ptToThree(p1), v2 = ptToThree(p2);
+        addDynamicClassifiedSegments([[v1, v2]], { color: seg.color || (isLight ? 0xd97706 : 0xfbbf24), linewidth: seg.width || 1.9 });
+        if (seg.label && uiState.showEdgeLabels) rootGroup.add(makeLabel(seg.label, v1.clone().lerp(v2, 0.5), "math-label dist", new THREE.Vector3(0, 0.16, 0)));
+      }
+      for (const rl of (spec.rayLines || [])) {
+        let e1, e2, dir;
+        if (rl.p1 && rl.p2) { e1 = toThree(...rl.p1); e2 = toThree(...rl.p2); dir = e2.clone().sub(e1).normalize(); }
+        else {
+          const o = vMap.get(rl.through), dA = vMap.get(rl.dirFrom), dB = vMap.get(rl.dirTo);
+          if (!o || !dA || !dB) continue;
+          const o3 = ptToThree(o); dir = ptToThree(dB).sub(ptToThree(dA)).normalize();
+          const len = rl.halfLen || 1.65; e1 = o3.clone().addScaledVector(dir, -len); e2 = o3.clone().addScaledVector(dir, len);
+        }
+        addDynamicClassifiedSegments([[e1, e2]], { color: rl.color || 0xdc2626, linewidth: rl.width || 2.1 });
+        if (rl.label && dir) rootGroup.add(makeLabel(rl.label, e2.clone().addScaledVector(dir, 0.22), rl.labelClass || "math-label line-red", new THREE.Vector3()));
+      }
+      for (const ra of (spec.rightAngles || [])) {
+        const vAt = vMap.get(ra.at), v1 = vMap.get(ra.to1), v2 = vMap.get(ra.to2);
+        if (vAt && v1 && v2) rootGroup.add(makeRightAngleMark(ptToThree(vAt), ptToThree(v1), ptToThree(v2), 0.24, ra.color || 0xfbbf24));
+      }
+      for (const ang of (spec.angles || [])) {
+        const vAt = vMap.get(ang.at), v1 = vMap.get(ang.to1), v2 = vMap.get(ang.to2);
+        if (vAt && v1 && v2) rootGroup.add(makeAngleArc(ptToThree(vAt), ptToThree(v1), ptToThree(v2), ang.radius || 0.68, ang.color || 0xf59e0b, ang.labelPrefix || "φ = "));
+      }
+      const planes = [];
+      if (spec.sectionPlane) planes.push(spec.sectionPlane);
+      if (Array.isArray(spec.extraPlanes)) planes.push(...spec.extraPlanes);
+      if (planes.length && spec.faces?.length >= 4) {
+        for (const sp of planes) {
+          let vRef = null, nVec = null;
+          if (sp.through?.length >= 3) {
+            const p1 = vMap.get(sp.through[0]), p2 = vMap.get(sp.through[1]), p3 = vMap.get(sp.through[2]);
+            if (p1 && p2 && p3) { vRef = ptToThree(p1); nVec = ptToThree(p2).sub(vRef).cross(ptToThree(p3).sub(vRef)); }
+          } else if (sp.pointId && sp.parallelTo?.length >= 3) {
+            const p0 = vMap.get(sp.pointId), a = vMap.get(sp.parallelTo[0]), b = vMap.get(sp.parallelTo[1]), c = vMap.get(sp.parallelTo[2]);
+            if (p0 && a && b && c) { vRef = ptToThree(p0); nVec = ptToThree(b).sub(ptToThree(a)).cross(ptToThree(c).sub(ptToThree(a))); }
+          } else if (sp.pointId && sp.perpLine?.length === 2) {
+            const p0 = vMap.get(sp.pointId), a = vMap.get(sp.perpLine[0]), b = vMap.get(sp.perpLine[1]);
+            if (p0 && a && b) { vRef = ptToThree(p0); nVec = ptToThree(b).sub(ptToThree(a)); }
+          }
+          if (!vRef || !nVec || nVec.lengthSq() < 1e-6) continue;
+          const { points } = clipConvexPolyhedron(vMap, spec.faces, nVec, vRef);
+          if (points.length >= 3) drawSectionPolygon(points, sp.color || 0xf43f5e, sp.opacity ?? 0.36, true);
+        }
+      }
+      for (const tp of (spec.tintedPlanes || [])) {
+        const pts3 = (tp.through || []).map((id) => vMap.get(id)).filter(Boolean).map(ptToThree);
+        if (pts3.length < 3) continue;
+        let polyPts = pts3;
+        const allOnPoly = !polyTopology || pts3.every((p) => polyTopology.faceNormals.every((n, fi) => n.dot(p.clone().sub(polyTopology.faceCenters[fi])) <= 0.06));
+        if (allOnPoly && spec.faces?.length >= 4 && tp.useClip !== false) {
+          const nVec = new THREE.Vector3().subVectors(pts3[1], pts3[0]).cross(new THREE.Vector3().subVectors(pts3[2], pts3[0]));
+          if (nVec.lengthSq() > 1e-6) {
+            const cl = clipConvexPolyhedron(vMap, spec.faces, nVec, pts3[0]);
+            if (cl.points.length >= 3) polyPts = cl.points;
+          }
+        }
+        drawSectionPolygon(polyPts, tp.color || "#38bdf8", tp.opacity ?? 0.24, false);
+      }
+      refreshDynamicEdges();
+      for (const cs of (spec.curvedSolids || [])) {
+        if (cs.type === "sphere") {
+          const sph = new THREE.Mesh(new THREE.SphereGeometry(cs.radius, 40, 28), new THREE.MeshPhysicalMaterial({ color: cs.color || 0xa855f7, transparent: true, opacity: cs.opacity ?? 0.15, roughness: 0.15, depthWrite: false, side: THREE.FrontSide }));
+          sph.position.copy(toThree(...cs.center));
+          rootGroup.add(sph);
+        }
+      }
+      const allPts = spec.vertices.map(ptToThree);
+      const center3D = allPts.length ? allPts.reduce((a, p) => a.add(p), new THREE.Vector3()).divideScalar(allPts.length) : new THREE.Vector3();
+      for (const v of spec.vertices) {
+        const pos = ptToThree(v);
+        const outDir = pos.clone().sub(center3D);
+        if (outDir.lengthSq() < 1e-4) outDir.set(0, 1, 0); else outDir.normalize();
+        const offset = outDir.multiplyScalar(0.24);
+        if (pos.y >= center3D.y) offset.y += 0.06;
+        const lbl = uiState.showVertexLabels ? (v.label || v.id) : "";
+        const dotColor = isLight ? (v.aux ? 0x0f172a : 0x000000) : (v.color || (v.aux ? 0x10b981 : 0xf8fafc));
+        rootGroup.add(makePoint(lbl, pos, dotColor, v.aux ? "math-label aux" : "math-label", offset, null));
+      }
+    }
+
+    const titleEl = document.getElementById("viewerTitleEl");
+    function setViewerBanner(text) {
+      if (!titleEl) return;
+      titleEl.textContent = "👁 ";
+      const b = document.createElement("b");
+      b.textContent = text;
+      titleEl.appendChild(b);
+    }
+
+    function applyFrozenViewerState(snap) {
+      if (!snap?.spec) return;
+      FROZEN = snap;
+      Object.assign(uiState, snap.ui || {});
+      const isLight = uiState.light !== false;
+      document.body.classList.toggle("light", isLight);
+      scene.background = new THREE.Color(isLight ? 0xffffff : 0x0b1120);
+      if (snap.cam?.pos) camera.position.set(...snap.cam.pos);
+      if (snap.cam?.target) controls.target.set(...snap.cam.target);
+      controls.update();
+      const titleTxt = snap.title || "Mô hình 3D Chỉ Xem";
+      setViewerBanner(titleTxt);
+      document.title = titleTxt + " — Chỉ Xem";
+      renderFrozenScene(snap.spec);
+      refreshDynamicEdges();
+    }
+
+    async function loadViewerFromUrl() {
+      const urlView = new URLSearchParams(window.location.search).get("view");
+      const hashView = window.location.hash.match(/^#view=([^&]+)/)?.[1];
+      const raw = urlView || hashView;
+      if (!raw) {
+        setViewerBanner("Chưa có dữ liệu hình — Hãy mở link #view=... từ PDF hoặc app tạo hình");
+        return;
+      }
+      try {
+        const snap = await decodeViewerPayload(raw);
+        if (snap?.spec) applyFrozenViewerState(snap);
+        else setViewerBanner("Dữ liệu #view=... không hợp lệ");
+      } catch (err) {
+        setViewerBanner("Không thể giải mã link #view=...: " + err.message);
+      }
+    }
+
+    if (FROZEN) {
+      applyFrozenViewerState(FROZEN);
+    } else {
+      loadViewerFromUrl();
+      window.addEventListener("hashchange", loadViewerFromUrl);
+    }
+
+    controls.addEventListener("change", refreshDynamicEdges);
+    document.getElementById("resetCam").addEventListener("click", () => {
+      if (!FROZEN?.cam) return;
+      camera.position.set(...FROZEN.cam.pos);
+      controls.target.set(...FROZEN.cam.target);
+      controls.update();
+    });
+    window.addEventListener("resize", () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      labelRenderer.setSize(window.innerWidth, window.innerHeight);
+      if (solidEdgeLine) solidEdgeLine.material.resolution.set(window.innerWidth, window.innerHeight);
+      if (hiddenEdgeLine) hiddenEdgeLine.material.resolution.set(window.innerWidth, window.innerHeight);
+      for (const grp of dynamicSegmentGroups) {
+        grp.solidLine.material.resolution.set(window.innerWidth, window.innerHeight);
+        grp.dashedLine.material.resolution.set(window.innerWidth, window.innerHeight);
+      }
+    });
+    renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); labelRenderer.render(scene, camera); });
+  </script>
+</body>
+</html>
